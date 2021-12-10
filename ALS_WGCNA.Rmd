@@ -1,0 +1,452 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+library(DESeq2)
+library(tidyverse)
+library(RColorBrewer)
+library(pheatmap)
+library(DEGreport)
+library(tximport)
+library(ggplot2)
+library(ggrepel)
+library(pheatmap)
+library('EnhancedVolcano')
+library("knitr")
+library("WGCNA")
+options(stringsAsFactors = FALSE)
+```
+
+```{r}
+load(file="results/counts_pure.Rdata") 
+
+```
+
+
+```{r}
+samples <- list.files(path = "/home/azbukinanadezda/SRP174614_ALS/quants-gencode", full.names = T)
+files <- file.path(samples, "quant.sf")
+## Since all quant files have the same name it is useful to have names for each element
+names(files) <- str_replace(samples, "/home/azbukinanadezda/SRP174614_ALS/quants-gencode/", "") 
+files1 = files[file.exists(files)]
+
+meta <- read.delim("/home/azbukinanadezda/SRP174614_ALS/processing/SraRunTable.txt", header = T, sep=',')
+sample_names <- c(names(files1))
+meta <- meta[match(sample_names, meta$Run), ] #choose only existing files 
+meta[1:5,]
+row.names(meta)<-as.character(meta$Run)
+dim(meta)
+
+data1 <- txipure$counts
+
+
+```
+```{r}
+meta$sample_group <-gsub( "ALS Spectrum MND", "ALS", meta$sample_group)
+meta$sample_group <-gsub( "Non-Neurological Control", "HC", meta$sample_group)
+meta$sample_group <-gsub( "Other Neurological Disorders", "ND", meta$sample_group)
+```
+
+```{r}
+meta$sample_group
+```
+
+```{r make transformation, normalization to library size}
+dds <- DESeqDataSetFromTximport(txipure, colData = meta, design = ~ sample_group)
+vsd <- varianceStabilizingTransformation(dds, blind=T)
+data3 <-assay(vsd)
+save(data3, meta, file='data_for_WGCNA_normalized.Rdata')
+```
+```{r}
+df_index = meta$Run[meta$sample_group=="ALS"] #choosу only ALS patients
+df_index = as.character(df_index)
+length(df_index)
+dfad <- data3[,df_index]
+dfad <- as.data.frame(t(dfad))
+dim(dfad)
+dfad[1:5,1:5]
+
+```
+
+```{r}
+gsg = goodSamplesGenes(dfad, verbose = 3);
+gsg$allOK
+```
+```{r cluster for outliers, fig.height=10, fig.width=15}
+sampleTree = hclust(dist(dfad), method = "average");
+
+par(cex = 0.6);
+par(mar = c(0,4,2,0))
+plot(sampleTree, main = "Sample clustering to detect outliers", sub="", xlab="", cex.lab = 1.5,
+cex.axis = 1.5, cex.main = 2)
+
+```
+
+
+```{r cut outliers}
+# Determine cluster under the line(in OY scale)
+clust = cutreeStatic(sampleTree, cutHeight = 95) 
+table(clust)
+```
+```{r }
+# clust 1 contains the samples we want to keep.
+keepSamples = (clust==1)
+datExpr = dfad[keepSamples, ]
+nGenes = ncol(datExpr)
+nSamples = nrow(datExpr)
+dim(datExpr)
+```
+```{r}
+names(traitData)
+```
+
+
+
+```{r}
+traitData = as.data.frame((meta))
+dim(traitData)
+#remove columns that hold information we do not need.
+allTraits = traitData[, c("Run","sample_group")]
+
+dim(allTraits)
+names(allTraits)
+#Form a data frame analogous to expression data that will hold the clinical traits.
+femaleSamples = rownames(datExpr)
+traitRows = match(femaleSamples, row.names(allTraits))
+datTraits = allTraits[traitRows,]
+datTraits[1:5,]
+collectGarbage()
+```
+```{r}
+as.factor(datTraits$sample_group)
+```
+
+
+
+
+```{r fig.height=10, fig.width=18}
+sampleTree2 = hclust(dist(datExpr), method = "average")
+# Convert traits to a color representation: white means low, red means high, grey means missing entry 
+#traitColors = numbers2colors(as.numeric(as.factor(datTraits$sample_group)), signed = FALSE, centered=T)
+# Plot the sample dendrogram and the colors underneath.
+plot(sampleTree2,
+                  main = "Sample dendrogram ")
+
+```
+```{r}
+save(datExpr, datTraits, file = "ALS_01-dataInput.RData")
+load(file = "ALS_01-dataInput.RData")
+```
+
+```{r Choose a set of soft-thresholding powers}
+# Choose a set of soft-thresholding powers
+powers = c(1:10)
+#powers = c(c(1:10), seq(from = 12, to=30, by=2))
+# Call the network topology analysis function
+sft = pickSoftThreshold(datExpr, powerVector = powers, verbose = 5)
+```
+```{r  fig.width=10}
+# Plot the results:
+
+par(mfrow = c(1,2))
+cex1 = 0.9
+# Scale-free topology fit index as a function of the soft-thresholding power 
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2], xlab="Soft Threshold (power)", 
+     ylab="Scale Free Topology Model Fit,signed R^2",type="n",
+main = paste("Scale independence"))
+
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],labels=powers,cex=cex1,col="red")
+
+# this line corresponds to using an R^2 cut-off of h abline(h=0.90,col="red")
+# Mean connectivity as a function of the soft-thresholding power 
+plot(sft$fitIndices[,1], sft$fitIndices[,5], xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n", 
+     main = paste("Mean connectivity"))
+
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
+```
+
+
+
+```{r}
+# Number of resampling runs
+nRuns = 30
+power = 6
+deepSplit = 2
+minModuleSize = 30
+networkType = "signed hybrid"
+TOMType = "unsigned"
+TOMDenom = "mean"
+reassignThreshold = 0
+mergeCutHeight = 0.25
+verbose = 1
+# Proportion of missing data. Not needed for the calculations, but useful to know. 
+propNA = sum(is.na(datExpr))/length(datExpr)
+propNA
+```
+```{r}
+dim(datExpr)
+```
+
+```{r}
+tmf0 = system.time ( {
+mods0 = sampledBlockwiseModules(nRuns = nRuns, replace = TRUE, datExpr = datExpr,maxBlockSize = 20000, networkType = networkType, TOMType = TOMType, TOMDenom = TOMDenom,deepSplit = deepSplit, mergeCutHeight = mergeCutHeight,reassignThreshold = reassignThreshold,  numericLabels = TRUE,checkMissingData = FALSE, quickCor = 0, verbose = 5 ) } )
+#Print the timing results
+print(tmf0)
+# Save the resampled modules
+save(tmf0, mods0, file = "sampledModule-ALS-mods.RData")
+```
+
+
+
+
+```{r}
+load(file = "sampledModule-ALS-mods.RData")
+slowAnalysis = function(datExpr)
+{
+cor = stats::cor(datExpr, use = "p")
+cor[cor<0] = 0
+adj = cor^power
+dTOM = TOMdist(adj, TOMType = TOMType, TOMDenom = TOMDenom) 
+collectGarbage()
+tree = stats::hclust(as.dist(dTOM), method = "a")
+labels = cutreeDynamic(tree, minClusterSize = minModuleSize, distM = dTOM, deepSplit = deepSplit)
+
+mergedLabels = mergeCloseModules(datExpr, labels, cutHeight = mergeCutHeight)
+mergedLabels
+}
+tms = system.time({slowLabels = slowAnalysis(datExpr)}) 
+print(tms)
+collectGarbage()
+```
+
+```{r}
+# if necessary, re-load the results of the resampling analysis
+load(file = "sampledModule-ALS-mods.RData")
+nGenes = ncol(datExpr)
+# Define a matrix of labels for the original and all resampling runs labels = matrix(0, nGenes, nRuns + 1)
+labels = matrix(0, nGenes, nRuns + 1)
+labels[, 1] = mods0[[1]]$mods$colors
+# Relabel modules in each of the resampling runs so that full and reampled modules with best overlaps have # the same labels. This is achieved by the function matchLabels.
+pind = initProgInd()
+for (r in 2:(nRuns))
+{
+print(r)
+labels[, r] = matchLabels(mods0[[r]]$mods$colors,  labels[, 1]) 
+pind = updateProgInd((r-1)/nRuns, pind)
+}
+# Save the results
+save(labels, file = "sampledModuleALS-matchedLabels.RData")
+```
+
+```{r}
+#load(file = "sampledModule-ALS-mods.RData")
+length(mods0[[1]]$mods$dendrograms[[1]])
+mods0[[1]]$mods$dendrograms[[1]]
+length(labels)
+
+length(mods0[[1]]$mods$colors)
+
+```
+
+
+
+```{r}
+# if necessary, re-load the results of the resampling analysis
+#load(file = "sampledModule-ALS-mods.RData")
+#load(file = "sampledModuleALS-matchedLabels.RData")
+# Open a large pdf file to hold the resulting plot
+
+pdf(file = "results/sampledModule-ALS-dendrogramAndSampledColors.pdf", wi=20, h=15)
+
+plotDendroAndColors(mods0[[1]]$mods$dendrograms[[1]],
+labels2colors(labels),
+c("Full data set", paste("Resampling", c(1:nRuns))),
+main = "Gene dendrogram and module labels from resampled data sets", autoColorHeight = FALSE, colorHeight = 0.65,
+dendroLabels = FALSE, hang = 0.03, guideHang = 0.05,
+addGuide = TRUE,
+guideAll = FALSE,
+cex.main = 2, cex.lab = 1.6, cex.colorLabels = 0.8, marAll = c(0, 5, 3, 0))
+dev.off()
+
+
+```
+```{r}
+dim(labels)
+```
+
+
+```{r} 
+#calculate how many times we obtained each label
+
+all_labels = unlist(apply(labels, 2, unique))
+ref_modules = unique(labels[,1])
+rest_modules = all_labels[length(ref_modules):length(all_labels)]
+ref_modules[order(ref_modules)]
+table(rest_modules)
+```
+```{r}
+fullnet = mods0[[1]]
+badmodules <-c(7,9,10,12,15,16,18,21,22,23,24,25,26,27,28,29,30,31,32,33)
+for(i in 1:length(badmodules)){
+  
+  fullnet$mods$colors[fullnet$mods$colors==badmodules[i]]<-0
+  
+}
+unique(fullnet$mods$colors)
+```
+
+
+
+```{r}
+moduleLabels1 = fullnet$mods$colors
+moduleColor1s = labels2colors(fullnet$mods$colors)
+MEs01 = moduleEigengenes(datExpr, moduleLabels1)$eigengenes
+
+a <- substring(names(MEs01),3,nchar(as.character(names(MEs01))))
+
+a1 <- labels2colors(a)
+
+names(MEs01) <-paste(a,a1, sep='_')
+
+MEs1 = orderMEs(MEs01)
+geneModuleMembership1 = as.data.frame(cor(datExpr, MEs01, use = "p")) #kME
+geneModuleMembership1[1:2,]
+
+write.table(geneModuleMembership1, file="results/kMEAD_filtered.txt") 
+
+#save(fullnet, geneModuleMembership1, datTraits, datExpr, file = "fullnet.RData")
+```
+
+```{r fig.width =15}
+
+#load(file="AD-all-networkConstruction-auto.RData")
+mergedColors = labels2colors(fullnet$mods$colors)
+# Plot the dendrogram and the module colors underneath
+plotDendroAndColors(fullnet$mods$dendrograms[[1]], mergedColors[mods0[[1]]$mods$blockGenes[[1]]],
+                  "Module colors",
+dendroLabels = FALSE, hang = 0.03, addGuide = TRUE, guideHang = 0.05)
+```
+
+```{r}
+#genes - modules 
+a<-labels2colors(c(0,7))
+
+dynamicColors = labels2colors(fullnet$mods$colors)
+restGenes=(!dynamicColors %in% a) 
+col <- dynamicColors[restGenes]
+length(col)
+length(dynamicColors)
+SubGeneNames = colnames(datExpr)
+names(col) <- SubGeneNames[which(restGenes)]
+label_col <- fullnet$mods$colors[restGenes]
+module_tables <- cbind(read.table(text = names(col)), col,label_col )
+
+module_tables1 = module_tables[,2:3]
+module_tables1[1:5,]
+write.table(module_tables1, file="results/modules_ALS_filtered.txt", ) 
+```
+
+```{r fig.width = 20}
+#heatmaps
+module.order <- unlist(tapply(1:ncol(datExpr),as.factor(dynamicColors),I))
+m<-t(t(datExpr[,module.order])/apply(datExpr[,module.order],2,max))
+my_palette <- colorRampPalette(c("green", "black", "red"))(n = 1000)
+pdf(file = "results/heatmap_ALS.pdf", wi=20, h=15)
+heatmap(t(m),col=my_palette, Rowv=NA,Colv=NA,labRow=NA,scale="row",RowSideColors=dynamicColors[module.order])
+dev.off()
+```
+```{r fig.width=10}
+MEList = moduleEigengenes(datExpr, colors = dynamicColors)
+MEseigin = MEList$eigengenes
+MET = orderMEs(MEseigin)
+plotEigengeneNetworks(MET, "", marDendro = c(0,4,1,2), marHeatmap = c(3,4,1,2))
+
+```
+
+```{r}
+BiocManager::install("org.Hs.eg.db")
+library("org.Hs.eg.db")
+```
+```{r}
+# annotation GO terms
+col <- dynamicColors[restGenes]
+genenames <- SubGeneNames[which(restGenes)]
+#label_col <- fullnet$mods$colors[restGenes]
+
+idmap <- select(org.Hs.eg.db, genenames, "ENTREZID", 'SYMBOL')
+#check length
+length(idmap[ ,2])
+length(col)
+length(genenames)
+idmap <- idmap %>% distinct(SYMBOL, .keep_all = TRUE)
+length(idmap[ ,2])
+
+```
+
+```{r}
+GOenr = GOenrichmentAnalysis(col, idmap[ ,2], organism = "human", nBestP = 10)
+tab = GOenr$bestPTerms[[3]]$enrichment
+write.table(tab, file = "results/GOEnrichmentTable.csv", sep = ",", quote = TRUE, row.names = FALSE)
+dim(tab)
+```
+```{r}
+tab[1:10,]
+```
+
+
+```{r TOM calculate}
+
+load(file = "fullnet.RData")
+badmodules = c(0)
+dynamicColors = labels2colors(fullnet$mods$colors)
+
+KIM_table <-intramodularConnectivity.fromExpr(datExpr, dynamicColors, 
+              corFnc = "cor", corOptions = "use = 'p'",
+             
+              distFnc = "dist",
+              networkType = "unsigned", power = 6,
+              scaleByMax = TRUE,
+              ignoreColors = badmodules,
+              getWholeNetworkConnectivity = TRUE)
+KIM_table1 <-intramodularConnectivity.fromExpr(datExpr, dynamicColors, 
+              corFnc = "cor", corOptions = "use = 'p'",
+             
+              distFnc = "dist",
+              networkType = "unsigned", power = 6,
+              scaleByMax = F,
+              ignoreColors = badmodules,
+              getWholeNetworkConnectivity = TRUE)
+
+KIM_table1[,2] = KIM_table[,2]
+
+KIM_table1[,5] = dynamicColors
+KIM_table1[,6] = fullnet$mods$colors
+names(KIM_table1) <- c(names(KIM_table1)[1:4], c('modules', 'modules_no'))
+
+row.names(KIM_table1) <-names(fullnet$mods$colors)
+save(KIM_table1, file = 'KIM_table.RData')
+
+write.table(KIM_table1, file = 'results/KIM_table.txt')
+KIM_table1[1:10,]
+
+
+
+```
+
+
+
+
+
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). 
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
